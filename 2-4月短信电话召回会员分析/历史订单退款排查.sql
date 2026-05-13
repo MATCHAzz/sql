@@ -303,6 +303,293 @@ GROUP BY `退款入账日期`
 ORDER BY `历史退款金额`;
 
 
+/* 6.1 召回用户：召回后 7 日内退款类型人数和金额，对齐会员底表口径 */
+WITH
+base AS
+(
+    SELECT
+        *
+    FROM
+    (
+        /* 这里放会员底表 SQL */
+    )
+),
+
+total AS
+(
+    SELECT
+        uniqExact(`用户ID`) AS total_recall_user_cnt
+    FROM base
+)
+
+SELECT
+    refund_type AS `召回后7日退款类型`,
+    refund_user_cnt AS `退款用户数`,
+    round(refund_user_cnt / total_recall_user_cnt, 6) AS `占召回用户比例`,
+    refund_amount AS `退款金额`
+FROM
+(
+    SELECT
+        '召回前历史订单退款' AS refund_type,
+        uniqExactIf(`用户ID`, `7日历史订单退款金额_剔除黑产` < 0) AS refund_user_cnt,
+        sum(`7日历史订单退款金额_剔除黑产`) AS refund_amount
+    FROM base
+
+    UNION ALL
+
+    SELECT
+        '召回后7日新订单退款' AS refund_type,
+        uniqExactIf(`用户ID`, `7日召回后新订单退款金额_剔除黑产` < 0) AS refund_user_cnt,
+        sum(`7日召回后新订单退款金额_剔除黑产`) AS refund_amount
+    FROM base
+
+    UNION ALL
+
+    SELECT
+        '未知原支付订单退款' AS refund_type,
+        uniqExactIf(`用户ID`, `7日未知原支付订单退款金额_剔除黑产` < 0) AS refund_user_cnt,
+        sum(`7日未知原支付订单退款金额_剔除黑产`) AS refund_amount
+    FROM base
+) AS s
+CROSS JOIN total
+ORDER BY `退款金额`;
+
+
+/* 6.2 召回用户：7 日历史订单退款用户的人群特征分布 */
+WITH
+base AS
+(
+    SELECT
+        *,
+        multiIf(
+            `沉默天数` BETWEEN 30 AND 35, '30-35天',
+            `沉默天数` BETWEEN 36 AND 59, '36-59天',
+            `沉默天数` BETWEEN 60 AND 100, '60-100天',
+            `沉默天数` > 100, '100天以上',
+            '其他'
+        ) AS silent_bucket
+    FROM
+    (
+        /* 这里放会员底表 SQL */
+    )
+),
+
+hist_users AS
+(
+    SELECT *
+    FROM base
+    WHERE `7日历史订单退款金额_剔除黑产` < 0
+),
+
+total AS
+(
+    SELECT
+        uniqExact(`用户ID`) AS hist_refund_user_cnt
+    FROM hist_users
+)
+
+SELECT
+    dim_name AS `维度`,
+    dim_value AS `维度值`,
+    user_cnt AS `历史退款用户数`,
+    round(user_cnt / hist_refund_user_cnt, 4) AS `占历史退款用户比例`,
+    refund_amount AS `历史退款金额`,
+    pay_user_cnt_7d AS `其中7日正向支付用户数`,
+    pay_income_7d AS `其中7日正向支付收入`,
+    attr_net_income_7d AS `其中7日召回归因净收入`,
+    attr_net_income_after_recall AS `其中召回后累计归因净收入`
+FROM
+(
+    SELECT
+        '七类人群' AS dim_name,
+        toString(`七类人群`) AS dim_value,
+        uniqExact(`用户ID`) AS user_cnt,
+        sum(`7日历史订单退款金额_剔除黑产`) AS refund_amount,
+        uniqExactIf(`用户ID`, `7日是否会员正向支付` = 1) AS pay_user_cnt_7d,
+        sum(`7日会员正向支付收入_剔除黑产`) AS pay_income_7d,
+        sum(`7日会员净收入_召回归因口径_剔除黑产`) AS attr_net_income_7d,
+        sum(`召回后累计会员净收入_召回归因口径_剔除黑产`) AS attr_net_income_after_recall
+    FROM hist_users
+    GROUP BY `七类人群`
+
+    UNION ALL
+
+    SELECT
+        '平台' AS dim_name,
+        toString(`平台`) AS dim_value,
+        uniqExact(`用户ID`) AS user_cnt,
+        sum(`7日历史订单退款金额_剔除黑产`) AS refund_amount,
+        uniqExactIf(`用户ID`, `7日是否会员正向支付` = 1) AS pay_user_cnt_7d,
+        sum(`7日会员正向支付收入_剔除黑产`) AS pay_income_7d,
+        sum(`7日会员净收入_召回归因口径_剔除黑产`) AS attr_net_income_7d,
+        sum(`召回后累计会员净收入_召回归因口径_剔除黑产`) AS attr_net_income_after_recall
+    FROM hist_users
+    GROUP BY `平台`
+
+    UNION ALL
+
+    SELECT
+        '沉默区间' AS dim_name,
+        silent_bucket AS dim_value,
+        uniqExact(`用户ID`) AS user_cnt,
+        sum(`7日历史订单退款金额_剔除黑产`) AS refund_amount,
+        uniqExactIf(`用户ID`, `7日是否会员正向支付` = 1) AS pay_user_cnt_7d,
+        sum(`7日会员正向支付收入_剔除黑产`) AS pay_income_7d,
+        sum(`7日会员净收入_召回归因口径_剔除黑产`) AS attr_net_income_7d,
+        sum(`召回后累计会员净收入_召回归因口径_剔除黑产`) AS attr_net_income_after_recall
+    FROM hist_users
+    GROUP BY silent_bucket
+
+    UNION ALL
+
+    SELECT
+        '召回月份' AS dim_name,
+        toString(`召回月份`) AS dim_value,
+        uniqExact(`用户ID`) AS user_cnt,
+        sum(`7日历史订单退款金额_剔除黑产`) AS refund_amount,
+        uniqExactIf(`用户ID`, `7日是否会员正向支付` = 1) AS pay_user_cnt_7d,
+        sum(`7日会员正向支付收入_剔除黑产`) AS pay_income_7d,
+        sum(`7日会员净收入_召回归因口径_剔除黑产`) AS attr_net_income_7d,
+        sum(`召回后累计会员净收入_召回归因口径_剔除黑产`) AS attr_net_income_after_recall
+    FROM hist_users
+    GROUP BY `召回月份`
+) AS s
+CROSS JOIN total
+ORDER BY
+    `维度`,
+    `历史退款金额`;
+
+
+/* 6.3 召回用户：如果排除 7 日历史订单退款用户，召回量级和会员收入影响 */
+WITH
+base AS
+(
+    SELECT
+        *
+    FROM
+    (
+        /* 这里放会员底表 SQL */
+    )
+),
+
+total AS
+(
+    SELECT
+        uniqExact(`用户ID`) AS total_recall_user_cnt
+    FROM base
+)
+
+SELECT
+    cohort AS `人群`,
+    recall_user_cnt AS `召回用户数`,
+    round(recall_user_cnt / total_recall_user_cnt, 6) AS `占召回用户比例`,
+    pay_user_cnt_7d AS `7日正向支付用户数`,
+    pay_income_7d AS `7日正向支付收入`,
+    refund_cash_7d AS `7日退款金额_现金流口径`,
+    hist_refund_7d AS `7日历史订单退款金额`,
+    new_order_refund_7d AS `7日召回后新订单退款金额`,
+    net_cash_7d AS `7日现金流净收入`,
+    net_attr_7d AS `7日召回归因净收入`,
+    net_attr_after_recall AS `召回后累计归因净收入`
+FROM
+(
+    SELECT
+        '全量召回用户' AS cohort,
+        uniqExact(`用户ID`) AS recall_user_cnt,
+        uniqExactIf(`用户ID`, `7日是否会员正向支付` = 1) AS pay_user_cnt_7d,
+        sum(`7日会员正向支付收入_剔除黑产`) AS pay_income_7d,
+        sum(`7日退款金额_现金流口径_剔除黑产`) AS refund_cash_7d,
+        sum(`7日历史订单退款金额_剔除黑产`) AS hist_refund_7d,
+        sum(`7日召回后新订单退款金额_剔除黑产`) AS new_order_refund_7d,
+        sum(`7日会员净收入_现金流口径_剔除黑产`) AS net_cash_7d,
+        sum(`7日会员净收入_召回归因口径_剔除黑产`) AS net_attr_7d,
+        sum(`召回后累计会员净收入_召回归因口径_剔除黑产`) AS net_attr_after_recall
+    FROM base
+
+    UNION ALL
+
+    SELECT
+        '拟排除：7日历史订单退款用户' AS cohort,
+        uniqExact(`用户ID`) AS recall_user_cnt,
+        uniqExactIf(`用户ID`, `7日是否会员正向支付` = 1) AS pay_user_cnt_7d,
+        sum(`7日会员正向支付收入_剔除黑产`) AS pay_income_7d,
+        sum(`7日退款金额_现金流口径_剔除黑产`) AS refund_cash_7d,
+        sum(`7日历史订单退款金额_剔除黑产`) AS hist_refund_7d,
+        sum(`7日召回后新订单退款金额_剔除黑产`) AS new_order_refund_7d,
+        sum(`7日会员净收入_现金流口径_剔除黑产`) AS net_cash_7d,
+        sum(`7日会员净收入_召回归因口径_剔除黑产`) AS net_attr_7d,
+        sum(`召回后累计会员净收入_召回归因口径_剔除黑产`) AS net_attr_after_recall
+    FROM base
+    WHERE `7日历史订单退款金额_剔除黑产` < 0
+
+    UNION ALL
+
+    SELECT
+        '排除后剩余召回用户' AS cohort,
+        uniqExact(`用户ID`) AS recall_user_cnt,
+        uniqExactIf(`用户ID`, `7日是否会员正向支付` = 1) AS pay_user_cnt_7d,
+        sum(`7日会员正向支付收入_剔除黑产`) AS pay_income_7d,
+        sum(`7日退款金额_现金流口径_剔除黑产`) AS refund_cash_7d,
+        sum(`7日历史订单退款金额_剔除黑产`) AS hist_refund_7d,
+        sum(`7日召回后新订单退款金额_剔除黑产`) AS new_order_refund_7d,
+        sum(`7日会员净收入_现金流口径_剔除黑产`) AS net_cash_7d,
+        sum(`7日会员净收入_召回归因口径_剔除黑产`) AS net_attr_7d,
+        sum(`召回后累计会员净收入_召回归因口径_剔除黑产`) AS net_attr_after_recall
+    FROM base
+    WHERE `7日历史订单退款金额_剔除黑产` >= 0
+) AS s
+CROSS JOIN total
+ORDER BY
+    multiIf(
+        `人群` = '全量召回用户', 1,
+        `人群` = '拟排除：7日历史订单退款用户', 2,
+        3
+    );
+
+
+/* 6.4 召回用户：拟排除的 7 日历史订单退款用户明细，对齐会员底表口径 */
+WITH
+base AS
+(
+    SELECT
+        *,
+        multiIf(
+            `沉默天数` BETWEEN 30 AND 35, '30-35天',
+            `沉默天数` BETWEEN 36 AND 59, '36-59天',
+            `沉默天数` BETWEEN 60 AND 100, '60-100天',
+            `沉默天数` > 100, '100天以上',
+            '其他'
+        ) AS silent_bucket
+    FROM
+    (
+        /* 这里放会员底表 SQL */
+    )
+)
+
+SELECT
+    `用户ID`,
+    `召回日期`,
+    `召回月份`,
+    `平台`,
+    `七类人群`,
+    `沉默天数`,
+    silent_bucket AS `沉默区间`,
+    `召回标签`,
+    `7日是否会员正向支付`,
+    `7日会员正向支付收入_剔除黑产`,
+    `7日历史订单退款金额_剔除黑产`,
+    `7日召回后新订单退款金额_剔除黑产`,
+    `7日会员净收入_现金流口径_剔除黑产`,
+    `7日会员净收入_召回归因口径_剔除黑产`,
+    `召回后累计会员净收入_召回归因口径_剔除黑产`
+FROM base
+WHERE `7日历史订单退款金额_剔除黑产` < 0
+ORDER BY
+    `7日历史订单退款金额_剔除黑产` ASC,
+    `召回日期` DESC
+LIMIT 10000;
+
+
 /* 4. 只看召回用户：召回后 7 日内退款按原支付时间归类 */
 WITH
 base AS
