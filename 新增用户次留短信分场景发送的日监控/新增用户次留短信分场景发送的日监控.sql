@@ -1,6 +1,6 @@
 WITH
-    toDate('{{start}}') AS start_dt,
-    toDate('{{end}}') AS end_dt
+    addDays(yesterday(), -29) AS start_dt,
+    yesterday() AS end_dt
 
 SELECT
     dt AS d,
@@ -8,7 +8,6 @@ SELECT
 
     `触达平台下发量级`,
     round(`触达平台下发量级` / nullIf(`sql量级`, 0), 4) AS `触达平台下发占比`,
-    round(`触达平台下发活跃量级` / nullIf(`触达平台下发量级`, 0), 4) AS `触达平台下发活跃率`,
 
     `触达平台返回成功量级`,
     round(`触达平台返回成功量级` / nullIf(`触达平台下发量级`, 0), 4) AS `触达平台成功率`,
@@ -28,11 +27,7 @@ SELECT
 
     `兜底文案发送成功量级`,
     round(`兜底文案发送成功量级` / nullIf(`触达平台返回成功量级`, 0), 4) AS `兜底文案下发占比`,
-    round(`兜底文案活跃量级` / nullIf(`兜底文案发送成功量级`, 0), 4) AS `兜底文案活跃率`,
-
-    `其他场景发送成功量级`,
-    round(`其他场景发送成功量级` / nullIf(`触达平台返回成功量级`, 0), 4) AS `其他场景下发占比`,
-    round(`其他场景活跃量级` / nullIf(`其他场景发送成功量级`, 0), 4) AS `其他场景活跃率`
+    round(`兜底文案活跃量级` / nullIf(`兜底文案发送成功量级`, 0), 4) AS `兜底文案活跃率`
 FROM
 (
     SELECT
@@ -55,10 +50,7 @@ FROM
         uniqExactIf(base.uid, ifNull(sms.is_request_success, 0) = 1 AND ifNull(active.is_active, 0) = 1) AS `好友请求场景活跃量级`,
 
         uniqExactIf(base.uid, ifNull(sms.is_default_success, 0) = 1) AS `兜底文案发送成功量级`,
-        uniqExactIf(base.uid, ifNull(sms.is_default_success, 0) = 1 AND ifNull(active.is_active, 0) = 1) AS `兜底文案活跃量级`,
-
-        uniqExactIf(base.uid, ifNull(sms.is_other_success, 0) = 1) AS `其他场景发送成功量级`,
-        uniqExactIf(base.uid, ifNull(sms.is_other_success, 0) = 1 AND ifNull(active.is_active, 0) = 1) AS `其他场景活跃量级`
+        uniqExactIf(base.uid, ifNull(sms.is_default_success, 0) = 1 AND ifNull(active.is_active, 0) = 1) AS `兜底文案活跃量级`
     FROM
     (
         SELECT
@@ -98,8 +90,7 @@ FROM
             max(if(raw_is_send_success = 1 AND scene = '内推场景', 1, 0)) AS is_inner_success,
             max(if(raw_is_send_success = 1 AND scene = '最近访客场景', 1, 0)) AS is_recent_visitor_success,
             max(if(raw_is_send_success = 1 AND scene = '好友请求场景', 1, 0)) AS is_request_success,
-            max(if(raw_is_send_success = 1 AND scene = '兜底文案', 1, 0)) AS is_default_success,
-            max(if(raw_is_send_success = 1 AND scene = '其他场景', 1, 0)) AS is_other_success
+            max(if(raw_is_send_success = 1 AND scene = '兜底文案', 1, 0)) AS is_default_success
         FROM
         (
             SELECT
@@ -119,7 +110,7 @@ FROM
                     tag_l LIKE '%request%',
                     '好友请求场景',
 
-                    '其他场景'
+                    ''
                 ) AS scene
             FROM
             (
