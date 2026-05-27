@@ -1,8 +1,28 @@
+/*
+口径：
+1. t 日期默认取最近 30 个已完整观察到 t+6 的日期：
+   - start_dt = yesterday() - 35
+   - end_dt = yesterday() - 6
+   如需看其他时间段，调整下面 WITH 里的 start_dt / end_dt。
+2. 分母：t-1 注册完成的新用户，并排除管理层 / HR / 猎头等人群。
+3. 好友申请：
+   - 来自 dwd.dw_network_add_friend_di。
+   - uid2 为收到好友申请的新用户，uid 为发起好友申请的用户。
+   - 统计 req_date 在 t 或 t+6 当天的好友申请。
+   - 排除官方账号 / 小助手 / 会员服务 / IM 助手发起的好友申请。
+4. 输出：
+   - t 天好友申请数量 >= 1 的用户数及占比。
+   - t+6 天好友申请数量 >= 1 的用户数及占比。
+*/
+
 WITH
--- 1. 排除官方账号 / 小助手 / 会员服务 / IM 助手
+    addDays(yesterday(), -35) AS start_dt,
+    addDays(yesterday(), -6) AS end_dt,
+
 exclude_sender AS (
     SELECT DISTINCT uid
-    FROM (
+    FROM
+    (
         SELECT
             toUInt64(uid) AS uid
         FROM dim.dim_user_tag_bak
@@ -21,17 +41,15 @@ exclude_sender AS (
                 AND ifNull(trimBoth(real_name), '') = '脉脉'
             )
             OR positionUTF8(ifNull(real_name, ''), '小脉同学') > 0
-
+            
         UNION ALL
 
-        -- IM 小助手
         SELECT
             toUInt64(uid) AS uid
         FROM dim.dim_im_assistant
     )
 ),
 
--- 2. 排除管理层 / HR / 猎头等新用户
 exclude_new_user AS (
     SELECT DISTINCT
         toUInt64(uid) AS uid
@@ -69,69 +87,63 @@ exclude_new_user AS (
       )
 ),
 
--- 3. 昨天的 +1 新用户
-new_user AS (
+new_user_base AS (
     SELECT
         toUInt64(u.uid) AS uid,
-        yesterday() AS day
+        addDays(toDate(u.register_complete_date), 1) AS t_date
     FROM dim.dim_user u
-
     GLOBAL LEFT JOIN exclude_new_user e
         ON toUInt64(u.uid) = e.uid
-
-    WHERE toDate(u.register_complete_date) = yesterday() - 1
+    WHERE toDate(u.register_complete_date) BETWEEN addDays(start_dt, -1) AND addDays(end_dt, -1)
       AND ifNull(e.uid, 0) = 0
-
     GROUP BY
         uid,
-        day
+        t_date
 ),
 
--- 4. 今天有未读消息的用户，并取最新一条未读消息发送方
-message_notify_user AS (
+friend_request_user AS (
     SELECT
-        toUInt64(m.dst_uid) AS uid,
-        m.d AS day,
-
-        uniqExact(m.mid) AS msg_notify_cnt,
-
-        max(m.send_ts) AS latest_send_ts,
-
-        argMax(toUInt64(m.src_uid), m.send_ts) AS max_ts_uid
-
-    FROM dwm.dw_im_message_life_cycle_di m
-
+        toDate(req.req_date) AS request_date,
+        toUInt64(req.uid2) AS uid,
+        count() AS friend_request_cnt
+    FROM dwd.dw_network_add_friend_di req
     GLOBAL LEFT JOIN exclude_sender e
-        ON toUInt64(m.src_uid) = e.uid
-
-    WHERE m.d = yesterday()
-      AND m.read_ts = toDateTime(0)
-      AND toUInt64(m.src_uid) != 0
+        ON toUInt64(req.uid) = e.uid
+    PREWHERE req.d BETWEEN start_dt AND addDays(end_dt, 6)
+    WHERE toDate(req.req_date) BETWEEN start_dt AND addDays(end_dt, 6)
+       -- 排除无效用户
+      AND toUInt64(req.uid) != 0  
+      AND toUInt64(req.uid2) != 0
+      AND toUInt64(req.uid) != toUInt64(req.uid2)
       AND ifNull(e.uid, 0) = 0
-
     GROUP BY
-        uid,
-        day
-
-    HAVING uniqExact(m.mid) >= 1
+        request_date,
+        uid
 )
 
 SELECT
-    n.uid,
-    m.msg_notify_cnt AS `消息通知条数`,
-    m.max_ts_uid AS `最新消息发送方uid`,
-    sender.real_name AS `最新消息发送方姓名`,
-    sender.current_company AS `最新消息发送方公司`,
-    sender.current_position AS `最新消息发送方职位`
-FROM new_user n
-
-ANY INNER JOIN message_notify_user m
-    ON n.uid = m.uid
-   AND n.day = m.day
-
-LEFT JOIN dim.dim_user sender
-    ON m.max_ts_uid = toUInt64(sender.uid)
-
-ORDER BY
-    m.msg_notify_cnt DESC,
-    n.uid;
+    t_date AS `t日期`,
+    addDays(t_date, -1) AS `t-1新增日期`,
+    addDays(t_date, 6) AS `t+6日期`,
+    base_user_cnt AS `t-1新增用户数`,
+    t_request_user_cnt AS `t天好友申请>=1用户数`,
+    round(t_request_user_cnt / nullIf(base_user_cnt, 0), 4) AS `t天好友申请>=1用户占比`,
+    t_plus_6_request_user_cnt AS `t+6天好友申请>=1用户数`,
+    round(t_plus_6_request_user_cnt / nullIf(base_user_cnt, 0), 4) AS `t+6天好友申请>=1用户占比`
+FROM
+(
+    SELECT
+        base.t_date AS t_date,
+        uniqExact(base.uid) AS base_user_cnt,
+        uniqExactIf(base.uid, ifNull(req_t.friend_request_cnt, 0) >= 1) AS t_request_user_cnt,
+        uniqExactIf(base.uid, ifNull(req_t6.friend_request_cnt, 0) >= 1) AS t_plus_6_request_user_cnt
+    FROM new_user_base base
+    ANY LEFT JOIN friend_request_user req_t
+        ON base.uid = req_t.uid
+       AND base.t_date = req_t.request_date
+    ANY LEFT JOIN friend_request_user req_t6
+        ON base.uid = req_t6.uid
+       AND addDays(base.t_date, 6) = req_t6.request_date
+    GROUP BY base.t_date
+)
+ORDER BY `t日期` DESC;

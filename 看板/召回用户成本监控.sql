@@ -1,27 +1,15 @@
 /*
-看板1：召回核心指标监控
+看板2：召回用户成本监控
 
 口径：
 1. 业务日期取 toDate('2026-01-01') 到 yesterday()。
-2. 召回用户来自 dwm.dw_growth_user_sms_recall_di：
-   - 智能电话召回 tag LIKE 'recall_phone%' 且命中次日复播/复呼成功明细时，业务日期按 d - 1 归因。
-   - 其余召回按 d 归因。
-   - 只保留召回明细日期当天 is_silent_30d = 1 的用户。
-   - 只保留业务日期当天 is_sms_touch = 1 的用户。
-   - 召回人数每个业务日期、每个 uid 只保留一条召回记录；按渠道优先级和 recall_dt/tag 保留一条记录，并按这条 tag 判断互斥归属渠道。
-   - 短信通道召回量按互斥归属后的文本短信渠道统计，视频短信不计入短信通道，且要求能匹配到短信发送明细。
-   - 召回花费按当天全量召回触达发送成功明细汇总，不按 uid 去重；
-     短信/Push/视频短信成本来自 dws.dw_sms_di，智能电话成本来自 dwd.dw_growth_sms_smartphone_call_di。
-3. 渠道：
-   - 先按历史 channel 口径归类：recall_phone% = 智能电话，%wechat% = 微信，recall_push% = 特殊push，
-     其他 %push% = 普通push，%fumeiti% = 视频短信，其余 recall_% = 文本短信，其余 = 其他。
-   - 短信通道 = 互斥归属为文本短信、且能通过 touch_msg_id 或近 3 日成功短信兜底匹配到发送明细的去重用户。
-   - 电话通道 = 智能电话。
-   - 特殊 push 通道 = 特殊push。
-   - 微信&普通 push = 微信 + 普通push。
-4. 人群来自 dim.dim_user.seven_class：
+2. 召回用户、渠道互斥归因、人群拆分与「看板/召回量级监控.sql」保持一致。
+3. 召回成本按当天全量发送成功触达明细汇总，不按 uid 去重；
+   短信/Push/视频短信成本来自 dws.dw_sms_di，智能电话成本来自 dwd.dw_growth_sms_smartphone_call_di。
+4. CAC = 召回成本 / 召回用户数；分母为 0 时返回 NULL。
+5. 人群来自 dim.dim_user.seven_class：
    - 新经济尾部兼容历史命名 '新经济腰尾'。
-   - 其他用户 = 总召回用户 - 新经济头部 - 新经济尾部 - 传统主流一线。
+   - 其他用户 = 非新经济头部、非新经济尾部/腰尾、非传统主流一线。
 
 说明：
 看板权限解析会把命名 CTE 误判成真实表，所以这里不用命名 CTE。
@@ -29,22 +17,17 @@
 
 SELECT
     d,
-    sum(recall_user_cnt) AS `当天召回总量`,
-    round(sum(recall_fee), 2) AS `当天召回花费`,
-    sum(sms_recall_user_cnt) AS `短信通道召回量`,
-    sum(phone_recall_user_cnt) AS `电话通道召回量`,
-    sum(special_push_recall_user_cnt) AS `特殊push通道召回量`,
-    sum(wechat_push_recall_user_cnt) AS `微信&普通push召回量`,
-    sum(new_economy_head_user_cnt) AS `新经济头部召回用户数`,
-    sum(new_economy_tail_user_cnt) AS `新经济尾部召回用户数`,
-    sum(traditional_first_tier_user_cnt) AS `传统主流一线召回用户数`,
-    sum(recall_user_cnt)
-        - sum(new_economy_head_user_cnt)
-        - sum(new_economy_tail_user_cnt)
-        - sum(traditional_first_tier_user_cnt) AS `其他用户召回数`
+    round(sum(recall_fee) / nullIf(sum(recall_user_cnt), 0), 2) AS `当天召回总cac`,
+    round(sum(sms_recall_fee) / nullIf(sum(sms_recall_user_cnt), 0), 2) AS `短信当天cac`,
+    round(sum(phone_recall_fee) / nullIf(sum(phone_recall_user_cnt), 0), 2) AS `电话当天cac`,
+    round(sum(special_push_recall_fee) / nullIf(sum(special_push_recall_user_cnt), 0), 2) AS `特殊push当天cac`,
+    round(sum(new_economy_head_recall_fee) / nullIf(sum(new_economy_head_user_cnt), 0), 2) AS `新经济头部召回cac`,
+    round(sum(new_economy_tail_recall_fee) / nullIf(sum(new_economy_tail_user_cnt), 0), 2) AS `新经济尾部召回cac`,
+    round(sum(traditional_first_tier_recall_fee) / nullIf(sum(traditional_first_tier_user_cnt), 0), 2) AS `传统主流一线召回cac`,
+    round(sum(other_recall_fee) / nullIf(sum(other_user_cnt), 0), 2) AS `其他用户召回cac`
 FROM
 (
-    /* 1. 召回量、渠道拆分、人群拆分 */
+    /* 1. 召回用户数分母：总量、渠道、人群 */
     SELECT
         r.biz_date AS d,
         count() AS recall_user_cnt,
@@ -56,12 +39,19 @@ FROM
                 OR ifNull(sms_success_fallback.has_sms_record, 0) = 1
             )
         ) AS sms_recall_user_cnt,
+        toFloat64(0) AS sms_recall_fee,
         countIf(r.channel = '智能电话') AS phone_recall_user_cnt,
+        toFloat64(0) AS phone_recall_fee,
         countIf(r.channel = '特殊push') AS special_push_recall_user_cnt,
-        countIf(r.channel IN ('微信', '普通push')) AS wechat_push_recall_user_cnt,
+        toFloat64(0) AS special_push_recall_fee,
         countIf(u.seven_class = '新经济头部') AS new_economy_head_user_cnt,
+        toFloat64(0) AS new_economy_head_recall_fee,
         countIf(u.seven_class IN ('新经济尾部', '新经济腰尾')) AS new_economy_tail_user_cnt,
-        countIf(u.seven_class = '传统主流一线') AS traditional_first_tier_user_cnt
+        toFloat64(0) AS new_economy_tail_recall_fee,
+        countIf(u.seven_class = '传统主流一线') AS traditional_first_tier_user_cnt,
+        toFloat64(0) AS traditional_first_tier_recall_fee,
+        countIf(ifNull(u.seven_class, '未知') NOT IN ('新经济头部', '新经济尾部', '新经济腰尾', '传统主流一线')) AS other_user_cnt,
+        toFloat64(0) AS other_recall_fee
     FROM
     (
         SELECT
@@ -219,11 +209,12 @@ FROM
         GROUP BY
             emobile,
             touch_msg_id
-    ) AS sms_by_msg
+    ) AS sms_by_msg   -- 精确匹配
         ON r.emobile = sms_by_msg.emobile
        AND r.touch_msg_id = sms_by_msg.touch_msg_id
     ANY LEFT JOIN
     (
+        -- 它用于 touch_msg_id 为空或对不上时，按手机号、tag、日期去找“近 3 日内的成功短信”
         SELECT
             emobile,
             tag,
@@ -237,7 +228,7 @@ FROM
             emobile,
             tag,
             recall_date
-    ) AS sms_success_fallback
+    ) AS sms_success_fallback   -- 兜底匹配
         ON r.emobile = sms_success_fallback.emobile
        AND r.tag = sms_success_fallback.tag
        AND r.recall_date = sms_success_fallback.recall_date
@@ -254,24 +245,32 @@ FROM
 
     UNION ALL
 
-    /* 2. 召回花费：按当天全量发送成功触达成本汇总 */
+    /* 2. 召回成本分子：全量发送成功成本、渠道成本、人群成本 */
     SELECT
         s.biz_date AS d,
         toUInt64(0) AS recall_user_cnt,
         round(sum(s.fee), 2) AS recall_fee,
         toUInt64(0) AS sms_recall_user_cnt,
+        round(sumIf(s.fee, s.channel = '文本短信'), 2) AS sms_recall_fee,
         toUInt64(0) AS phone_recall_user_cnt,
+        round(sumIf(s.fee, s.channel = '智能电话'), 2) AS phone_recall_fee,
         toUInt64(0) AS special_push_recall_user_cnt,
-        toUInt64(0) AS wechat_push_recall_user_cnt,
+        round(sumIf(s.fee, s.channel = '特殊push'), 2) AS special_push_recall_fee,
         toUInt64(0) AS new_economy_head_user_cnt,
+        round(sumIf(s.fee, u.seven_class = '新经济头部'), 2) AS new_economy_head_recall_fee,
         toUInt64(0) AS new_economy_tail_user_cnt,
-        toUInt64(0) AS traditional_first_tier_user_cnt
+        round(sumIf(s.fee, u.seven_class IN ('新经济尾部', '新经济腰尾')), 2) AS new_economy_tail_recall_fee,
+        toUInt64(0) AS traditional_first_tier_user_cnt,
+        round(sumIf(s.fee, u.seven_class = '传统主流一线'), 2) AS traditional_first_tier_recall_fee,
+        toUInt64(0) AS other_user_cnt,
+        round(sumIf(s.fee, ifNull(u.seven_class, '未知') NOT IN ('新经济头部', '新经济尾部', '新经济腰尾', '传统主流一线')), 2) AS other_recall_fee
     FROM
     (
         /* 2.1 短信 / Push / 视频短信成本 */
         SELECT
             toUInt64(uid) AS uid,
             d AS biz_date,
+            channel,
             if(
                 is_send_success = 1,
                 multiIf(
@@ -319,7 +318,17 @@ FROM
             SELECT
                 toUInt64(uid) AS uid,
                 d,
+                tag,
                 is_send_success,
+                CASE
+                    WHEN tag LIKE 'recall_phone%' THEN '智能电话'
+                    WHEN tag LIKE '%wechat%' THEN '微信'
+                    WHEN tag LIKE 'recall_push%' THEN '特殊push'
+                    WHEN tag LIKE '%push%' THEN '普通push'
+                    WHEN tag LIKE '%fumeiti%' THEN '视频短信'
+                    WHEN tag LIKE 'recall_%' THEN '文本短信'
+                    ELSE '其他'
+                END AS channel,
                 if(
                     substringUTF8(content, 1, 5) LIKE '【脉脉】%',
                     lengthUTF8(content),
@@ -361,6 +370,7 @@ FROM
         SELECT
             uid,
             biz_date,
+            '智能电话' AS channel,
             if(success = 1, unit_price, 0) AS fee
         FROM
         (
@@ -401,6 +411,15 @@ FROM
         ) AS phone_with_price
         WHERE biz_date BETWEEN toDate('2026-01-01') AND yesterday()
     ) AS s
+    ANY LEFT JOIN
+    (
+        SELECT
+            toUInt64(uid) AS uid,
+            any(ifNull(nullIf(trimBoth(toString(seven_class)), ''), '未知')) AS seven_class
+        FROM dim.dim_user
+        GROUP BY uid
+    ) AS u
+        ON s.uid = u.uid
     GROUP BY s.biz_date
 ) AS metrics
 GROUP BY d
